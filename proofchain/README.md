@@ -16,7 +16,7 @@ presented that way.
 | Area | State |
 |---|---|
 | Smart contract (`ProvenanceRegistry`) | Done. Records, versions, revocation, identities. 12 tests. |
-| Backend API (FastAPI) | Done. 11 tests plus an end-to-end script against a live chain. |
+| Backend API (FastAPI) | Done. 12 tests plus an end-to-end script against a live chain. |
 | Public verification portal | Done. By file, ID or QR code. |
 | Register flow | Done. MetaMask, or unlocked Hardhat accounts on a local chain. |
 | Trust score | Done. Four named components, every point explained. |
@@ -113,11 +113,18 @@ frontend/    Next.js app: / (verify), /register, /verify/[id], /dashboard
 
 Backend settings are environment variables; see [backend/.env.example](backend/.env.example).
 
-- **PostgreSQL + IPFS:** `docker compose up -d`, then set `DATABASE_URL` and `IPFS_API_URL`.
+- **PostgreSQL + IPFS + shared rate limiting:** `docker compose up -d`, then set `DATABASE_URL`,
+  `IPFS_API_URL`, and/or `RATE_LIMIT_REDIS_URL` in `backend/.env` for the services you use.
 - **Sepolia:** fill in [contracts/.env.example](contracts/.env.example) as `contracts/.env`, run
   `npx hardhat run scripts/deploy.js --network sepolia`, then set `RPC_URL` and `DEPLOYMENT_FILE`
   for the backend. Use a throwaway deployer key holding test ETH only.
 - **Frontend API location:** `NEXT_PUBLIC_API_URL` (default `http://127.0.0.1:8000`).
+- **API abuse limits:** sliding-window limits default to 120 requests/minute per client and 20 uploads/minute
+  for `/api/analyze` and `/api/verify/file`. Configure with `API_RATE_LIMIT_PER_MINUTE` and
+  `UPLOAD_RATE_LIMIT_PER_MINUTE`. Without Redis these limits are per-process; set `RATE_LIMIT_REDIS_URL`
+  to use the shared Redis sliding window included in `docker-compose.yml` across workers/instances.
+  Configure Uvicorn's trusted proxy IPs (`--proxy-headers --forwarded-allow-ips=<proxy addresses>`) when
+  deploying behind a reverse proxy; the app does not trust arbitrary forwarded headers.
 - **Detector models:** fetched by [backend/ml/download_detector.py](backend/ml/download_detector.py) into
   `backend/models/` and run with ONNX Runtime. Without them the backend falls back to heuristics and
   safety checks. The image model is licensed **CC BY-NC 4.0 (non-commercial only)**; the text model is MIT.
@@ -129,10 +136,13 @@ Backend settings are environment variables; see [backend/.env.example](backend/.
    76–91% accuracy on generators outside its training set, and it also flags some CGI and rendered art.
    Text detectors misfire on formulaic or translated writing. Evaluate on a labelled set before making
    claims, and replace the non-commercial image model before any commercial use.
+   A holdout-set evaluator is available at `backend/ml/evaluate_detector.py`; give it separate `real/`
+   and `fake/` folders with labeled images. It reports confusion counts, precision, recall, specificity,
+   F1 and ROC AUC at the product's 0.6 threshold. No labeled evaluation corpus is included in this repository.
 2. **Anyone can register anything first.** Registration proves priority on this registry, not
    authorship. Near-duplicate flags help; verified identities are the real mitigation.
 3. **Identity verification is a single admin key.** Move to a multisig or an attester allow-list.
-4. **No rate limiting or API authentication** yet; add both before exposing the API publicly.
+4. **No API authentication** yet; add it before exposing the API publicly. Rate limiting is in place (see Configuration).
 5. **No event indexer.** Records registered outside the web app are indexed the first time someone
    verifies them. A background `Registered` log follower would close that gap.
 6. **Face-swap/lip-sync deepfake and synthetic-voice models**, C2PA manifest validation, PDF signature

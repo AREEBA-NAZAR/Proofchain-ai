@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -25,6 +26,11 @@ class Settings(BaseSettings):
     public_app_url: str = "http://localhost:3000"
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     max_upload_mb: int = 50
+    # Per-process sliding-window limits. Place a shared limiter at the edge for
+    # multi-worker or multi-instance deployments.
+    api_rate_limit_per_minute: int = Field(default=120, ge=1)
+    upload_rate_limit_per_minute: int = Field(default=20, ge=1)
+    rate_limit_redis_url: str | None = None
 
     # Pretrained AI-image classifier, run with ONNX Runtime (see backend/ml/download_detector.py).
     detector_onnx: str = str(BACKEND_DIR / "models" / "detector.onnx")
