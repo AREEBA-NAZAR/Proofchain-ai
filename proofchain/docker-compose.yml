@@ -1,0 +1,31 @@
+# Optional infrastructure for moving past the zero-setup defaults (SQLite + local
+# metadata files). Not exercised during prototype development (no Docker on the
+# build machine).
+#
+#   docker compose up -d
+#   then in backend/.env:
+#     DATABASE_URL=postgresql+psycopg2://proofchain:proofchain@localhost:5432/proofchain
+#     IPFS_API_URL=http://127.0.0.1:5001
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: proofchain
+      POSTGRES_PASSWORD: proofchain
+      POSTGRES_DB: proofchain
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  ipfs:
+    image: ipfs/kubo:latest
+    ports:
+      - "127.0.0.1:5001:5001" # API (keep private)
+      - "127.0.0.1:8080:8080" # gateway
+    volumes:
+      - ipfsdata:/data/ipfs
+
+volumes:
+  pgdata:
+  ipfsdata:

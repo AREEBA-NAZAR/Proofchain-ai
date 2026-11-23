@@ -1,0 +1,20 @@
+node_modules/
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+.env.local
+
+# contracts
+contracts/artifacts/
+contracts/cache/
+contracts/deployments/localhost.json
+
+# backend
+backend/data/
+backend/models/
+
+# frontend
+frontend/.next/
+frontend/next-env.d.ts
+frontend/tsconfig.tsbuildinfo
