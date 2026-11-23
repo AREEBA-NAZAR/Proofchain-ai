@@ -1,4 +1,7 @@
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL ??
+  (process.env.NEXT_PUBLIC_API_HOST
+    ? `https://${process.env.NEXT_PUBLIC_API_HOST}`
+    : process.env.NODE_ENV === "production" ? "" : "http://127.0.0.1:8000");
 
 export type Signal = { id: string; label: string; score: number | null; weight: number; detail: string };
 
@@ -93,7 +96,14 @@ export type AnalyzeResult = {
   already_registered: { creator: string; timestamp: number } | null;
 };
 
-export type ChainConfig = { chainId: number; network: string; address: string; abi: any[]; rpcUrl: string | null };
+export type ChainConfig = {
+  chainId: number;
+  network: string;
+  address: string;
+  abi: any[];
+  rpcUrl: string | null;
+  walletAuthRequired: boolean;
+};
 
 export type Stats = Record<
   "records" | "revoked" | "creators" | "analyzed" | "verifications" | "mismatches" | "flags" | "flags_serious",
@@ -115,11 +125,31 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function postFile<T>(path: string, file: File, fields: Record<string, string> = {}): Promise<T> {
+export function postFile<T>(path: string, file: File, fields: Record<string, string> = {}, token?: string): Promise<T> {
   const form = new FormData();
   form.append("file", file);
   for (const [k, v] of Object.entries(fields)) if (v) form.append(k, v);
-  return api<T>(path, { method: "POST", body: form });
+  return api<T>(path, {
+    method: "POST",
+    body: form,
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+}
+
+export async function signInWallet(
+  address: string,
+  signMessage: (message: string) => Promise<string>,
+): Promise<string> {
+  const challenge = await api<{ nonce: string; message: string }>(
+    `/api/auth/challenge?address=${encodeURIComponent(address)}`,
+  );
+  const signature = await signMessage(challenge.message);
+  const result = await api<{ access_token: string }>("/api/auth/verify", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ address, nonce: challenge.nonce, signature }),
+  });
+  return result.access_token;
 }
 
 export const shortAddr = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;

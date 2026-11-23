@@ -70,3 +70,12 @@ class VerificationEvent(Base):
     method: Mapped[str] = mapped_column(String(10))  # id | file
     result: Mapped[str] = mapped_column(String(20))  # verified | revoked | not_found | mismatch
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IndexerCursor(Base):
+    """Last finalized block scanned by the registry event indexer."""
+
+    __tablename__ = "indexer_cursors"
+
+    name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    block_number: Mapped[int] = mapped_column(BigInteger)

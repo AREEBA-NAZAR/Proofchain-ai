@@ -6,12 +6,21 @@ const hre = require("hardhat");
 
 async function main() {
   const [deployer] = await hre.ethers.getSigners();
+  const configuredAdmin = process.env.REGISTRY_ADMIN_ADDRESS;
+  if (configuredAdmin && !hre.ethers.isAddress(configuredAdmin)) {
+    throw new Error("REGISTRY_ADMIN_ADDRESS is not a valid address.");
+  }
   const registry = await hre.ethers.deployContract("ProvenanceRegistry");
   await registry.waitForDeployment();
 
   const address = await registry.getAddress();
   const tx = registry.deploymentTransaction();
   const receipt = await tx.wait();
+  if (configuredAdmin && configuredAdmin.toLowerCase() !== deployer.address.toLowerCase()) {
+    const adminTx = await registry.transferAdmin(configuredAdmin);
+    await adminTx.wait();
+  }
+  const admin = await registry.admin();
   const { chainId } = await hre.ethers.provider.getNetwork();
   const artifact = await hre.artifacts.readArtifact("ProvenanceRegistry");
 
@@ -19,6 +28,7 @@ async function main() {
     network: hre.network.name,
     chainId: Number(chainId),
     address,
+    admin,
     deployer: deployer.address,
     deployBlock: receipt.blockNumber,
     abi: artifact.abi,

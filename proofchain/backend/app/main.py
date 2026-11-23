@@ -1,17 +1,26 @@
 import hashlib
 import io
+import asyncio
+import logging
 import re
+import secrets
 import threading
 import time
 import uuid
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import qrcode
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from eth_keys import keys
+from eth_utils import keccak, to_checksum_address
+import jwt
+from jwt import PyJWTError
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -20,13 +29,14 @@ from . import fraud
 from .analysis import OnnxTextDetector, analyze, hamming, load_detector
 from .chain import ChainClient, ChainRecord, ChainUnavailable
 from .config import Settings, get_settings
-from .models import Asset, Base, Flag, Record, VerificationEvent
+from .models import Asset, Base, Flag, IndexerCursor, Record, VerificationEvent
 from .storage import Storage
 from .trust import DISCLAIMERS, compute_trust
 
 HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 SHORT_RE = re.compile(r"^PC-([0-9A-F]{12})$")
 MAX_FAMILY = 200
+log = logging.getLogger(__name__)
 
 
 def short_id(content_hash: str) -> str:
@@ -38,8 +48,17 @@ class ConfirmBody(BaseModel):
     tx_hash: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
 
 
+class AuthVerifyBody(BaseModel):
+    address: str = Field(pattern=r"^0x[0-9a-fA-F]{40}$")
+    nonce: str = Field(min_length=24, max_length=80)
+    signature: str = Field(pattern=r"^0x[0-9a-fA-F]{130}$")
+
+
 def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     settings = settings or get_settings()
+    public_app_url = f"https://{settings.public_app_host}" if settings.public_app_host else settings.public_app_url
+    if settings.wallet_auth_required and not settings.auth_token_secret:
+        raise ValueError("AUTH_TOKEN_SECRET is required when WALLET_AUTH_REQUIRED is enabled.")
 
     if settings.database_url.startswith("sqlite:///"):
         Path(settings.database_url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
@@ -61,11 +80,18 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        indexer_task = asyncio.create_task(indexer_loop()) if settings.indexer_enabled else None
         try:
             yield
         finally:
+            if indexer_task:
+                indexer_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await indexer_task
             if redis_client:
                 await redis_client.aclose()
+            if isinstance(chain, ChainClient):
+                chain.close()
 
     app = FastAPI(title="ProofChain AI", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -82,6 +108,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     rate_windows: dict[tuple[str, str], deque[float]] = {}
     rate_lock = threading.Lock()
     upload_paths = {"/api/analyze", "/api/verify/file"}
+    auth_challenges: dict[tuple[str, str], tuple[str, int]] = {}
+    auth_lock = threading.Lock()
     redis_window_script = """
         local key, now, member, max_count = KEYS[1], tonumber(ARGV[1]), ARGV[2], tonumber(ARGV[3])
         local window = 60000
@@ -242,6 +270,55 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         for rec in sorted(new, key=lambda r: r.timestamp):
             fraud.evaluate(db, rec)
 
+    def index_chain_once() -> None:
+        deployment = chain.deployment
+        latest = max(0, chain.ping() - settings.indexer_confirmations)
+        cursor_name = f"registered:{deployment['chainId']}:{deployment['address'].lower()}"
+        with SessionLocal() as db:
+            cursor = db.get(IndexerCursor, cursor_name)
+            start = cursor.block_number + 1 if cursor else int(deployment.get("deployBlock", latest))
+            if start > latest:
+                return
+            while start <= latest:
+                end = min(start + 999, latest)
+                events = chain.get_registered_events(start, end)
+                for cr, tx_hash, block_number in events:
+                    rec = upsert_record(db, cr)
+                    rec.tx_hash, rec.block_number = tx_hash, block_number
+                    fraud.evaluate(db, rec)
+                if cursor is None:
+                    cursor = IndexerCursor(name=cursor_name, block_number=end)
+                    db.add(cursor)
+                else:
+                    cursor.block_number = end
+                db.commit()
+                start = end + 1
+
+    async def indexer_loop() -> None:
+        while True:
+            try:
+                await asyncio.to_thread(index_chain_once)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Registry event indexer failed; it will retry.")
+            await asyncio.sleep(settings.indexer_poll_seconds)
+
+    def authenticated_wallet(request: Request) -> str | None:
+        if not settings.wallet_auth_required:
+            return None
+        header = request.headers.get("authorization", "")
+        if not header.lower().startswith("bearer "):
+            raise HTTPException(401, "Sign in with your wallet to continue.")
+        try:
+            claims = jwt.decode(
+                header[7:], settings.auth_token_secret, algorithms=["HS256"],
+                audience="proofchain", issuer=public_app_url,
+            )
+            return str(claims["sub"]).lower()
+        except (PyJWTError, KeyError, TypeError):
+            raise HTTPException(401, "Wallet session expired. Sign in again.")
+
     def record_dict(rec: Record, db: Session) -> dict:
         asset = db.get(Asset, rec.content_hash)
         return {
@@ -319,7 +396,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             "trust": compute_trust(record, identity, analysis, flags),
             "verification_count": checks,
             "chain": chain.info(),
-            "verify_url": f"{settings.public_app_url}/verify/{content_hash}",
+            "verify_url": f"{public_app_url}/verify/{content_hash}",
             "disclaimers": DISCLAIMERS,
         }
 
@@ -350,7 +427,72 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         return {
             "chainId": d["chainId"], "network": d["network"], "address": d["address"],
             "abi": d["abi"], "rpcUrl": settings.rpc_url if d["chainId"] == 31337 else None,
+            "walletAuthRequired": settings.wallet_auth_required,
         }
+
+    @app.get("/api/auth/challenge")
+    def auth_challenge(address: str):
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", address):
+            raise HTTPException(400, "Invalid wallet address.")
+        lower = address.lower()
+        nonce = secrets.token_urlsafe(24)
+        now = int(time.time())
+        expires = now + 120
+        domain = urlparse(public_app_url).netloc
+        message = (
+            "ProofChain wallet sign-in\n"
+            f"Domain: {domain}\n"
+            f"URI: {public_app_url}\n"
+            f"Address: {lower}\n"
+            f"Nonce: {nonce}\n"
+            f"Issued At: {datetime.fromtimestamp(now, timezone.utc).isoformat()}\n"
+            f"Expiration Time: {datetime.fromtimestamp(expires, timezone.utc).isoformat()}"
+        )
+        with auth_lock:
+            expired = [key for key, (_, exp) in auth_challenges.items() if exp <= now]
+            for key in expired:
+                auth_challenges.pop(key, None)
+            if len(auth_challenges) >= 4096:
+                raise HTTPException(503, "Sign-in is temporarily busy. Please retry shortly.")
+            auth_challenges[(lower, nonce)] = (message, expires)
+        return {"nonce": nonce, "message": message}
+
+    @app.post("/api/auth/verify")
+    def auth_verify(body: AuthVerifyBody):
+        if not settings.wallet_auth_required:
+            raise HTTPException(404, "Wallet sign-in is not enabled.")
+        now = int(time.time())
+        with auth_lock:
+            challenge = auth_challenges.pop((body.address.lower(), body.nonce), None)
+        if challenge is None or challenge[1] <= now:
+            raise HTTPException(401, "Sign-in challenge expired. Request a new one.")
+        try:
+            message = challenge[0].encode("utf-8")
+            digest = keccak(b"\x19Ethereum Signed Message:\n" + str(len(message)).encode() + message)
+            raw_signature = bytes.fromhex(body.signature[2:])
+            recovery_id = raw_signature[64]
+            if recovery_id >= 27:
+                recovery_id -= 27
+            if recovery_id not in (0, 1):
+                raise ValueError("Invalid signature recovery id")
+            signature = keys.Signature(vrs=(
+                recovery_id,
+                int.from_bytes(raw_signature[:32], "big"),
+                int.from_bytes(raw_signature[32:64], "big"),
+            ))
+            public_key = signature.recover_public_key_from_msg_hash(digest)
+            signer = to_checksum_address(keccak(public_key.to_bytes())[-20:])
+        except Exception:
+            raise HTTPException(401, "Wallet signature could not be verified.")
+        if signer.lower() != body.address.lower():
+            raise HTTPException(401, "Wallet signature does not match the requested address.")
+        expires = datetime.now(timezone.utc) + timedelta(seconds=settings.auth_token_ttl_seconds)
+        token = jwt.encode(
+            {"sub": signer.lower(), "iss": public_app_url, "aud": "proofchain", "exp": expires},
+            settings.auth_token_secret,
+            algorithm="HS256",
+        )
+        return {"access_token": token, "token_type": "bearer", "expires_in": settings.auth_token_ttl_seconds}
 
     @app.post("/api/analyze")
     async def analyze_file(
@@ -358,6 +500,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         title: str = Form("", max_length=200),
         description: str = Form("", max_length=2000),
         db: Session = Depends(get_db),
+        wallet: str | None = Depends(authenticated_wallet),
     ):
         """Fingerprint + analyze a file and prepare the metadata to register.
         The file is processed in memory and not stored."""
@@ -402,13 +545,15 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         }
 
     @app.post("/api/records/confirm")
-    def confirm(body: ConfirmBody, db: Session = Depends(get_db)):
+    def confirm(body: ConfirmBody, db: Session = Depends(get_db), wallet: str | None = Depends(authenticated_wallet)):
         """Called after the wallet's registration transaction is mined. We do not
         trust the caller: the record is read back from the chain."""
         content_hash = body.content_hash.lower()
         cr = chain.get_record(content_hash)
         if cr is None:
             raise HTTPException(404, "No on-chain record for this fingerprint yet.")
+        if wallet and wallet != cr.creator.lower():
+            raise HTTPException(403, "Sign in with the wallet that registered this fingerprint.")
         rec = upsert_record(db, cr)
         if body.tx_hash and rec.tx_hash is None:
             block = chain.find_registration_tx(body.tx_hash.lower(), content_hash)
@@ -485,7 +630,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     @app.get("/api/verify/{identifier}/qr.png")
     def qr(identifier: str, db: Session = Depends(get_db)):
         content_hash = resolve_id(db, identifier)
-        img = qrcode.make(f"{settings.public_app_url}/verify/{content_hash}", box_size=8, border=2)
+        img = qrcode.make(f"{public_app_url}/verify/{content_hash}", box_size=8, border=2)
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return Response(buf.getvalue(), media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
@@ -533,10 +678,28 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         }
 
     @app.get("/api/metadata/{digest}")
-    def metadata(digest: str):
-        doc = storage.get_json(digest.lower())
-        if doc is None:
+    def metadata(digest: str, db: Session = Depends(get_db)):
+        normalized = digest.lower()
+        doc = storage.get_json(normalized)
+        if doc is not None:
+            return doc
+        # Local object files may be ephemeral on container hosts. The indexed
+        # asset row is durable, so reconstruct this public metadata document.
+        asset = db.scalar(select(Asset).where(Asset.metadata_uri == f"sha256://{normalized}"))
+        if asset is None:
             raise HTTPException(404, "Metadata not found.")
-        return doc
+        return {
+            "schema": "proofchain/metadata/v1",
+            "content_hash": asset.content_hash,
+            "title": asset.title or asset.filename,
+            "description": asset.description,
+            "filename": asset.filename,
+            "mime": asset.mime,
+            "size": asset.size,
+            "analysis": {
+                key: (asset.analysis or {}).get(key)
+                for key in ("engine", "risk", "ai_risk", "verdict", "declared_generator")
+            },
+        }
 
     return app

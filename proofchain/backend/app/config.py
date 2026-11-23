@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     ipfs_api_url: str | None = None
 
     public_app_url: str = "http://localhost:3000"
+    public_app_host: str | None = None
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     max_upload_mb: int = 50
     # Per-process sliding-window limits. Place a shared limiter at the edge for
@@ -31,6 +32,12 @@ class Settings(BaseSettings):
     api_rate_limit_per_minute: int = Field(default=120, ge=1)
     upload_rate_limit_per_minute: int = Field(default=20, ge=1)
     rate_limit_redis_url: str | None = None
+    indexer_enabled: bool = False
+    indexer_poll_seconds: int = Field(default=10, ge=2, le=300)
+    indexer_confirmations: int = Field(default=3, ge=0, le=100)
+    wallet_auth_required: bool = False
+    auth_token_secret: str | None = None
+    auth_token_ttl_seconds: int = Field(default=900, ge=60, le=3600)
 
     # Pretrained AI-image classifier, run with ONNX Runtime (see backend/ml/download_detector.py).
     detector_onnx: str = str(BACKEND_DIR / "models" / "detector.onnx")

@@ -175,3 +175,41 @@ class ChainClient:
             ):
                 return int(receipt["blockNumber"], 16)
         return None
+
+    def get_registered_events(self, from_block: int, to_block: int) -> list[tuple[ChainRecord, str, int]]:
+        """Read and decode Registered logs for a bounded block range."""
+        logs = self._rpc("eth_getLogs", [{
+            "address": self.address,
+            "fromBlock": hex(from_block),
+            "toBlock": hex(to_block),
+            "topics": [REGISTERED_TOPIC],
+        }])
+        found = []
+        for log in logs:
+            topics = log.get("topics", [])
+            if len(topics) != 4:
+                continue
+            try:
+                content_hash = topics[1].lower()
+                creator = to_checksum_address("0x" + topics[2][-40:])
+                parent_hash = topics[3].lower()
+                root_hash, version, timestamp, metadata_uri = decode(
+                    ["bytes32", "uint32", "uint64", "string"], bytes.fromhex(log["data"][2:])
+                )
+                record = ChainRecord(
+                    content_hash=content_hash,
+                    creator=creator,
+                    timestamp=timestamp,
+                    version=version,
+                    revoked=False,
+                    parent_hash=None if parent_hash == ZERO_HASH else parent_hash,
+                    root_hash=_hex(root_hash),
+                    metadata_uri=metadata_uri,
+                )
+                found.append((record, log["transactionHash"].lower(), int(log["blockNumber"], 16)))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return found
+
+    def close(self) -> None:
+        self._http.close()

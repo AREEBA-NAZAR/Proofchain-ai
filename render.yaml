@@ -1,0 +1,61 @@
+services:
+  - type: web
+    name: proofchain-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./proofchain/Dockerfile.api
+    dockerContext: ./proofchain
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: proofchain-db
+          property: connectionString
+      - key: RPC_URL
+        sync: false
+      - key: DEPLOYMENT_FILE
+        value: /contracts/deployments/sepolia.json
+      - key: RATE_LIMIT_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: proofchain-limiter
+          property: connectionString
+      - key: PUBLIC_APP_HOST
+        fromService:
+          type: web
+          name: proofchain-web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: WALLET_AUTH_REQUIRED
+        value: "true"
+      - key: AUTH_TOKEN_SECRET
+        generateValue: true
+      - key: INDEXER_ENABLED
+        value: "true"
+
+  - type: web
+    name: proofchain-web
+    runtime: docker
+    plan: free
+    dockerfilePath: ./proofchain/Dockerfile.web
+    dockerContext: ./proofchain
+    healthCheckPath: /
+    envVars:
+      - key: NEXT_PUBLIC_API_HOST
+        fromService:
+          type: web
+          name: proofchain-api
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+
+  - type: keyvalue
+    name: proofchain-limiter
+    plan: free
+    ipAllowList: []
+
+databases:
+  - name: proofchain-db
+    plan: free
+    databaseName: proofchain
+    user: proofchain
+    postgresMajorVersion: "16"

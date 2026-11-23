@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { AnalysisPanel } from "@/components/AnalysisPanel";
 import { FileDrop } from "@/components/FileDrop";
 import {
-  API_URL, api, formatTime, postFile, shortAddr,
+  API_URL, api, formatTime, postFile, shortAddr, signInWallet,
   type AnalyzeResult, type ChainConfig, type Identity, type RecordInfo, type Report,
 } from "@/lib/api";
 import { connectDev, connectInjected, explainTxError, hasInjectedWallet, registry, type Wallet } from "@/lib/wallet";
@@ -19,6 +19,7 @@ export default function RegisterPage() {
   const [parentId, setParentId] = useState("");
   const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null);
   const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(null);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [name, setName] = useState("");
   const [done, setDone] = useState<RecordInfo | null>(null);
@@ -47,7 +48,18 @@ export default function RegisterPage() {
   const analyze = () =>
     step("Fingerprinting and analyzing…", async () => {
       setDone(null);
-      setAnalysis(await postFile<AnalyzeResult>("/api/analyze", file!, { title, description }));
+      let activeWallet = wallet;
+      if (cfg?.walletAuthRequired && !activeWallet) {
+        activeWallet = await connectInjected(cfg);
+        setWallet(activeWallet);
+        const creator = await api<{ identity: Identity | null }>(`/api/creators/${activeWallet.address}`);
+        setIdentity(creator.identity);
+      }
+      const token = cfg?.walletAuthRequired && activeWallet
+        ? await signInWallet(activeWallet.address, (message) => activeWallet!.signer.signMessage(message))
+        : undefined;
+      setAuthToken(token ?? null);
+      setAnalysis(await postFile<AnalyzeResult>("/api/analyze", file!, { title, description }, token));
     });
 
   const connect = (fn: () => Promise<Wallet>) =>
@@ -68,6 +80,10 @@ export default function RegisterPage() {
 
   const register = () =>
     step("Waiting for the transaction…", async () => {
+      const token = cfg?.walletAuthRequired && wallet
+        ? await signInWallet(wallet.address, (message) => wallet.signer.signMessage(message))
+        : authToken;
+      setAuthToken(token ?? null);
       let parentHash = ZeroHash;
       if (parentId.trim()) {
         const parent = await api<Report>(`/api/verify/${encodeURIComponent(parentId.trim())}`);
@@ -81,7 +97,10 @@ export default function RegisterPage() {
       setDone(
         await api<RecordInfo>("/api/records/confirm", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           body: JSON.stringify({ content_hash: analysis!.content_hash, tx_hash: tx.hash }),
         }),
       );
@@ -148,7 +167,7 @@ export default function RegisterPage() {
         <label htmlFor="desc">Description (optional)</label>
         <textarea id="desc" maxLength={2000} value={description} onChange={(e) => setDescription(e.target.value)} />
         <div style={{ marginTop: 14 }}>
-          <button onClick={analyze} disabled={!file || !!busy}>
+          <button onClick={analyze} disabled={!file || !cfg || !!busy}>
             {busy.startsWith("Fingerprinting") ? busy : "Analyze file"}
           </button>
         </div>
