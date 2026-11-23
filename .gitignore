@@ -1,0 +1,40 @@
+# Secrets and local environment files
+.env
+.env.*
+!.env.example
+!.env.production.example
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.production.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js / Hardhat
+node_modules/
+**/.next/
+**/out/
+**/cache/
+**/artifacts/
+coverage/
+
+# Local data, model weights, and generated deployments
+proofchain/backend/data/
+proofchain/backend/models/*.onnx
+proofchain/backend/models/*.pt
+proofchain/backend/models/text-detector/
+proofchain/contracts/deployments/*.json
+!proofchain/contracts/deployments/sepolia.json
+
+# Editors and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,12 @@
+.git
+.venv
+**/.venv
+**/node_modules
+**/.next
+**/__pycache__
+**/.env
+**/.env.*
+backend/data
+backend/models
+contracts/artifacts
+contracts/cache

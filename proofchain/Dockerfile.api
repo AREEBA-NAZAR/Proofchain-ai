@@ -1,0 +1,22 @@
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
+
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/app ./app
+COPY backend/ml ./ml
+COPY contracts/deployments /contracts/deployments
+ARG DOWNLOAD_DETECTORS=false
+RUN if [ "$DOWNLOAD_DETECTORS" = "true" ]; then python ml/download_detector.py; fi
+
+RUN useradd --create-home --uid 10001 proofchain \
+    && mkdir -p /app/data /app/models \
+    && chown -R proofchain:proofchain /app/data /app/models
+USER proofchain
+
+EXPOSE 8000
+CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

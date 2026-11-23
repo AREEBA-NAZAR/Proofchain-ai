@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /proofchain/contracts
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /proofchain/frontend
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /proofchain/backend
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

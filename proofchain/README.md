@@ -125,6 +125,10 @@ Backend settings are environment variables; see [backend/.env.example](backend/.
   to use the shared Redis sliding window included in `docker-compose.yml` across workers/instances.
   Configure Uvicorn's trusted proxy IPs (`--proxy-headers --forwarded-allow-ips=<proxy addresses>`) when
   deploying behind a reverse proxy; the app does not trust arbitrary forwarded headers.
+- **Wallet sign-in:** production Compose requires a wallet signature for file analysis and record confirmation.
+  Set `AUTH_TOKEN_SECRET` to a unique random secret. Public verification stays available without an account.
+- **Event indexer:** set `INDEXER_ENABLED=true` to follow `Registered` logs from the deployment block.
+  It waits for `INDEXER_CONFIRMATIONS` (default 3), scans in bounded ranges and stores its cursor in the database.
 - **Detector models:** fetched by [backend/ml/download_detector.py](backend/ml/download_detector.py) into
   `backend/models/` and run with ONNX Runtime. Without them the backend falls back to heuristics and
   safety checks. The image model is licensed **CC BY-NC 4.0 (non-commercial only)**; the text model is MIT.
@@ -141,10 +145,11 @@ Backend settings are environment variables; see [backend/.env.example](backend/.
    F1 and ROC AUC at the product's 0.6 threshold. No labeled evaluation corpus is included in this repository.
 2. **Anyone can register anything first.** Registration proves priority on this registry, not
    authorship. Near-duplicate flags help; verified identities are the real mitigation.
-3. **Identity verification is a single admin key.** Move to a multisig or an attester allow-list.
-4. **No API authentication** yet; add it before exposing the API publicly. Rate limiting is in place (see Configuration).
-5. **No event indexer.** Records registered outside the web app are indexed the first time someone
-   verifies them. A background `Registered` log follower would close that gap.
+3. **Identity verification needs a multisig admin.** Set `REGISTRY_ADMIN_ADDRESS` to the Safe/multisig when deploying.
+4. **Wallet authentication protects analysis and confirmation.** Public verification remains open; rate limits also apply.
+5. **Event indexing is opt-in.** Set `INDEXER_ENABLED=true` for the production API service.
 6. **Face-swap/lip-sync deepfake and synthetic-voice models**, C2PA manifest validation, PDF signature
    validation, and scanning inside archives.
-7. **Deployment:** Dockerfiles for the API and web app, CI, a Sepolia deployment.
+7. **Deployment:** Dockerfiles, TLS reverse proxy, Compose stack and CI are included. A live launch still
+   requires a domain pointed at the host, an RPC URL, a funded throwaway deployer key and a multisig/admin address;
+   see `.env.production.example`.

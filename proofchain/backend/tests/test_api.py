@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, PngImagePlugin
+from eth_keys import keys
+from eth_utils import keccak
 
 from app.chain import ChainIdentity, ChainRecord, ChainUnavailable
 from app.config import Settings
@@ -196,6 +198,44 @@ def test_api_and_upload_rate_limits(tmp_path):
         assert upload(client, png(12)).status_code == 200
         limited_upload = upload(client, png(13))
         assert limited_upload.status_code == 429 and "Retry-After" in limited_upload.headers
+
+
+def test_wallet_auth_protects_analysis_and_uses_one_time_challenges(tmp_path):
+    chain = FakeChain()
+    settings = Settings(
+        database_url=f"sqlite:///{(tmp_path / 'auth.db').as_posix()}",
+        storage_dir=str(tmp_path / "objects"),
+        detector_weights=str(tmp_path / "none.pt"),
+        detector_onnx=str(tmp_path / "none.onnx"),
+        text_detector_dir=str(tmp_path / "none-text"),
+        wallet_auth_required=True,
+        auth_token_secret="test-only-secret-with-sufficient-randomness",
+    )
+    private_key = keys.PrivateKey(bytes.fromhex("01" * 32))
+    address = private_key.public_key.to_checksum_address()
+    with TestClient(create_app(settings, chain=chain)) as client:
+        challenge = client.get("/api/auth/challenge", params={"address": address}).json()
+        message = challenge["message"].encode("utf-8")
+        digest = keccak(b"\x19Ethereum Signed Message:\n" + str(len(message)).encode() + message)
+        signature = "0x" + private_key.sign_msg_hash(digest).to_bytes().hex()
+        verified = client.post("/api/auth/verify", json={
+            "address": address,
+            "nonce": challenge["nonce"],
+            "signature": signature,
+        })
+        assert verified.status_code == 200
+        token = verified.json()["access_token"]
+        assert upload(client, png(14)).status_code == 401
+        assert client.post(
+            "/api/analyze",
+            files={"file": ("photo.png", png(14), "image/png")},
+            headers={"Authorization": f"Bearer {token}"},
+        ).status_code == 200
+        assert client.post("/api/auth/verify", json={
+            "address": address,
+            "nonce": challenge["nonce"],
+            "signature": signature,
+        }).status_code == 401
 
 
 def test_unregistered_content_is_not_found(env):
