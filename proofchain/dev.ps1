@@ -5,11 +5,32 @@ $root = $PSScriptRoot
 
 Start-Process powershell -ArgumentList '-NoExit', '-Command', "Set-Location '$root\contracts'; npx hardhat node"
 Write-Host 'Waiting for the local chain...'
-Start-Sleep -Seconds 8
+$deadline = (Get-Date).AddSeconds(45)
+$chainReady = $false
+while ((Get-Date) -lt $deadline) {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $connect = $client.BeginConnect('127.0.0.1', 8545, $null, $null)
+        if ($connect.AsyncWaitHandle.WaitOne(500) -and $client.Connected) {
+            $client.EndConnect($connect)
+            $chainReady = $true
+            break
+        }
+    } catch {
+        # The Hardhat node is still starting.
+    } finally {
+        $client.Dispose()
+    }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $chainReady) {
+    throw 'The local chain did not start on 127.0.0.1:8545 within 45 seconds.'
+}
 
 Push-Location "$root\contracts"
 npx hardhat run scripts/deploy.js --network localhost
 Pop-Location
+if ($LASTEXITCODE -ne 0) { throw 'Contract deployment failed; API and web app were not started.' }
 
 Start-Process powershell -ArgumentList '-NoExit', '-Command', "Set-Location '$root\backend'; .\.venv\Scripts\python -m uvicorn app.main:create_app --factory --port 8000"
 Start-Process powershell -ArgumentList '-NoExit', '-Command', "Set-Location '$root\frontend'; npm run dev"

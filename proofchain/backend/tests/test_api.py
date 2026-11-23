@@ -176,6 +176,28 @@ def test_upload_limits(env):
     assert upload(client, b"x" * (1024 * 1024 + 1)).status_code == 413
 
 
+def test_api_and_upload_rate_limits(tmp_path):
+    chain = FakeChain()
+    settings = Settings(
+        database_url=f"sqlite:///{(tmp_path / 'limited.db').as_posix()}",
+        storage_dir=str(tmp_path / "objects"),
+        detector_weights=str(tmp_path / "none.pt"),
+        detector_onnx=str(tmp_path / "none.onnx"),
+        text_detector_dir=str(tmp_path / "none-text"),
+        api_rate_limit_per_minute=2,
+        upload_rate_limit_per_minute=1,
+    )
+    with TestClient(create_app(settings, chain=chain)) as client:
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/api/health").status_code == 200
+        limited = client.get("/api/health")
+        assert limited.status_code == 429 and "Retry-After" in limited.headers
+
+        assert upload(client, png(12)).status_code == 200
+        limited_upload = upload(client, png(13))
+        assert limited_upload.status_code == 429 and "Retry-After" in limited_upload.headers
+
+
 def test_unregistered_content_is_not_found(env):
     client, _ = env
     h = upload(client, png(3)).json()["content_hash"]

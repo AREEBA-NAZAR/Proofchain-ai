@@ -1,6 +1,11 @@
 import hashlib
 import io
 import re
+import threading
+import time
+import uuid
+from collections import deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import qrcode
@@ -48,14 +53,104 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     detector = load_detector(settings.detector_onnx, settings.detector_weights)
     text_detector = OnnxTextDetector(settings.text_detector_dir)
     max_bytes = settings.max_upload_mb * 1024 * 1024
+    redis_client = None
+    if settings.rate_limit_redis_url:
+        from redis.asyncio import Redis
 
-    app = FastAPI(title="ProofChain AI", version="0.1.0")
+        redis_client = Redis.from_url(settings.rate_limit_redis_url, decode_responses=True)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            if redis_client:
+                await redis_client.aclose()
+
+    app = FastAPI(title="ProofChain AI", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
+
+    # Keep expensive public upload routes tighter than ordinary API reads.
+    # The client address comes from the ASGI connection; forwarded headers are
+    # deliberately not read here because they can be spoofed unless a proxy is
+    # explicitly trusted and configured.
+    rate_windows: dict[tuple[str, str], deque[float]] = {}
+    rate_lock = threading.Lock()
+    upload_paths = {"/api/analyze", "/api/verify/file"}
+    redis_window_script = """
+        local key, now, member, max_count = KEYS[1], tonumber(ARGV[1]), ARGV[2], tonumber(ARGV[3])
+        local window = 60000
+        redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
+        local count = redis.call('ZCARD', key)
+        if count >= max_count then
+            local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+            local retry = math.max(1, math.ceil((tonumber(oldest[2]) + window - now) / 1000))
+            redis.call('PEXPIRE', key, window)
+            return {0, retry}
+        end
+        redis.call('ZADD', key, now, member)
+        redis.call('PEXPIRE', key, window)
+        return {1, 0}
+    """
+
+    @app.middleware("http")
+    async def rate_limit(request: Request, call_next):
+        client = request.client.host if request.client else "unknown"
+        group = "upload" if request.url.path in upload_paths else "api"
+        limit = settings.upload_rate_limit_per_minute if group == "upload" else settings.api_rate_limit_per_minute
+        if redis_client:
+            try:
+                accepted, retry_after = await redis_client.eval(
+                    redis_window_script,
+                    1,
+                    f"proofchain:rate:{group}:{client}",
+                    int(time.time() * 1000),
+                    uuid.uuid4().hex,
+                    limit,
+                )
+            except Exception:
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "The shared rate limiter is unavailable."},
+                )
+            if not accepted:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too many requests. Please try again shortly."},
+                    headers={"Retry-After": str(retry_after)},
+                )
+            return await call_next(request)
+
+        now = time.monotonic()
+        key = (client, group)
+        with rate_lock:
+            if key not in rate_windows and len(rate_windows) >= 4096:
+                expired = [k for k, entries in rate_windows.items() if not entries or now - entries[-1] >= 60]
+                for old_key in expired:
+                    rate_windows.pop(old_key, None)
+                if len(rate_windows) >= 4096:
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": "Rate limiter is at capacity. Please try again shortly."},
+                        headers={"Retry-After": "60"},
+                    )
+            window = rate_windows.setdefault(key, deque())
+            while window and now - window[0] >= 60:
+                window.popleft()
+            if len(window) >= limit:
+                retry_after = max(1, int(60 - (now - window[0])))
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too many requests. Please try again shortly."},
+                    headers={"Retry-After": str(retry_after)},
+                )
+            window.append(now)
+        return await call_next(request)
 
     @app.exception_handler(ChainUnavailable)
     def chain_down(_: Request, exc: ChainUnavailable):
