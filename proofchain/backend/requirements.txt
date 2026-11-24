@@ -17,7 +17,7 @@ redis>=5.0              # only needed when RATE_LIMIT_REDIS_URL is configured
 pytest>=8.0
 
 # Content analysis
-onnxruntime>=1.18          # runs the pretrained image + text detectors
+onnxruntime>=1.32.0          # runs the pretrained image + text detectors
 tokenizers>=0.19
 pypdf>=4.0
 opencv-python-headless>=4.9  # video frame sampling
