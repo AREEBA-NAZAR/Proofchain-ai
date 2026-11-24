@@ -20,7 +20,7 @@ pytest>=8.0
 onnxruntime>=1.18          # runs the pretrained image + text detectors
 tokenizers>=0.19
 pypdf>=4.0
-opencv-python-headless>=4.9  # video frame sampling
+opencv-python-headless>=5.1.0.95  # video frame sampling
 
 # Optional learned detector (see ml/train_detector.py):
 # torch
