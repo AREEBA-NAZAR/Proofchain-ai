@@ -1,0 +1,4 @@
+[build]
+  base = "proofchain/frontend"
+  command = "npm run build"
+  publish = ".next"
